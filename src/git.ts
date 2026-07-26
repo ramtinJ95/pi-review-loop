@@ -14,8 +14,16 @@ export interface FilePair {
   modifiedContent: string;
 }
 
+let gitOperations: Promise<void> = Promise.resolve();
+
+function enqueueGit<T>(operation: () => Promise<T>): Promise<T> {
+  const result = gitOperations.then(operation, operation);
+  gitOperations = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 async function git(pi: ExtensionAPI, cwd: string, args: string[], allowFailure = false): Promise<string> {
-  const result = await pi.exec("git", args, { cwd });
+  const result = await enqueueGit(() => pi.exec("git", args, { cwd }));
   if (result.code !== 0) {
     if (allowFailure) return "";
     throw new Error(result.stderr.trim() || result.stdout.trim() || `git ${args.join(" ")} failed`);
@@ -68,6 +76,16 @@ async function untrackedPaths(pi: ExtensionAPI, repoRoot: string): Promise<strin
   return splitZero(await git(pi, repoRoot, ["ls-files", "--others", "--exclude-standard", "-z"], true));
 }
 
+export async function getIgnoredPaths(pi: ExtensionAPI, repoRoot: string): Promise<string[]> {
+  const output = await git(
+    pi,
+    repoRoot,
+    ["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+    true,
+  );
+  return splitZero(output).map((path) => path.replace(/\/$/, ""));
+}
+
 async function currentPaths(pi: ExtensionAPI, repoRoot: string): Promise<string[]> {
   return splitZero(await git(pi, repoRoot, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], true));
 }
@@ -90,7 +108,7 @@ async function readCurrent(repoRoot: string, path: string): Promise<string | nul
 
 async function readRevision(pi: ExtensionAPI, repoRoot: string, revision: string | null, path: string): Promise<string | null> {
   if (revision == null) return null;
-  const result = await pi.exec("git", ["show", `${revision}:${path}`], { cwd: repoRoot });
+  const result = await enqueueGit(() => pi.exec("git", ["show", `${revision}:${path}`], { cwd: repoRoot }));
   return result.code === 0 ? result.stdout : null;
 }
 

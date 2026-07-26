@@ -2,7 +2,7 @@ import { relative, sep } from "node:path";
 import { watch, type FSWatcher } from "chokidar";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { open, type GlimpseWindow } from "glimpseui";
-import { createCheckpoint, getRepoRoot } from "./git.js";
+import { createCheckpoint, getIgnoredPaths, getRepoRoot } from "./git.js";
 import { composeFeedback } from "./prompt.js";
 import type { HostMessage, ReviewCheckpoint, WindowMessage } from "./types.js";
 import { loadReviewHtml } from "./ui.js";
@@ -69,7 +69,7 @@ export class ReviewController {
     this.window = window;
     window.on("message", (value) => {
       const message = parseMessage(value);
-      if (message != null) void this.handleMessage(message, ctx);
+      if (message != null) this.enqueue(() => this.handleMessage(message, ctx));
     });
     window.on("closed", () => this.disposeWindow(window));
     window.on("error", (error) => {
@@ -83,6 +83,7 @@ export class ReviewController {
   async close(): Promise<void> {
     if (this.refreshTimer != null) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
+    this.model = null;
     await this.watcher?.close();
     this.watcher = null;
     const window = this.window;
@@ -91,11 +92,15 @@ export class ReviewController {
   }
 
   private async startWatcher(): Promise<void> {
+    const ignoredPaths = await getIgnoredPaths(this.pi, this.repoRoot);
     this.watcher = watch(this.repoRoot, {
       ignoreInitial: true,
       ignored: (path) => {
-        const rel = relative(this.repoRoot, path);
-        return rel === ".git" || rel.startsWith(`.git${sep}`) || rel === "node_modules" || rel.startsWith(`node_modules${sep}`);
+        const repoPath = this.toRepoPath(path);
+        if (repoPath == null) return false;
+        if (repoPath === ".git" || repoPath.startsWith(".git/")) return true;
+        if (repoPath === "node_modules" || repoPath.startsWith("node_modules/")) return true;
+        return ignoredPaths.some((ignored) => repoPath === ignored || repoPath.startsWith(`${ignored}/`));
       },
     });
     this.watcher.on("all", (_event, path) => {
@@ -181,6 +186,7 @@ export class ReviewController {
     this.window = null;
     if (this.refreshTimer != null) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
+    this.model = null;
     void this.watcher?.close();
     this.watcher = null;
     this.onClosed();

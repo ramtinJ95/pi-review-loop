@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { composeFeedback } from "../src/prompt.js";
-import { createCheckpoint, decodeStored, parsePorcelainPaths, scanAgainstCheckpoint } from "../src/git.js";
+import { createCheckpoint, decodeStored, getIgnoredPaths, parsePorcelainPaths, scanAgainstCheckpoint } from "../src/git.js";
 import { WorkspaceModel } from "../src/workspace.js";
 
 const execFileAsync = promisify(execFile);
@@ -102,6 +103,60 @@ test("checkpoint stores dirty state and produces only the next delta", async () 
     assert.equal(delta.find((file) => file.path === "clean.ts")?.originalContent, "export const clean = true;\n");
     assert.equal(delta.find((file) => file.path === "untracked.ts")?.originalContent, "first\n");
     assert.equal(await readFile(join(cwd, "app.ts"), "utf8"), "export const value = 3;\n");
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("workspace refresh serializes git subprocesses", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "review-loop-"));
+  try {
+    await git(cwd, "init", "-b", "main");
+    await git(cwd, "config", "user.email", "test@example.com");
+    await git(cwd, "config", "user.name", "Test");
+    await writeFile(join(cwd, "app.ts"), "export const value = 1;\n");
+    await git(cwd, "add", ".");
+    await git(cwd, "commit", "-m", "initial");
+    await writeFile(join(cwd, "app.ts"), "export const value = 2;\n");
+
+    const delegate = fakePi();
+    let activeExecutions = 0;
+    let maximumExecutions = 0;
+    const serializedPi = {
+      async exec(command: string, args: string[], options?: { cwd?: string }) {
+        activeExecutions += 1;
+        maximumExecutions = Math.max(maximumExecutions, activeExecutions);
+        await delay(10);
+        try {
+          return await delegate.exec(command, args, options);
+        } finally {
+          activeExecutions -= 1;
+        }
+      },
+    } as ExtensionAPI;
+
+    const model = await WorkspaceModel.create(serializedPi, cwd, null);
+    await model.refresh();
+
+    assert.equal(maximumExecutions, 1);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test("ignored directories are excluded from the workspace watcher", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "review-loop-"));
+  try {
+    await git(cwd, "init", "-b", "main");
+    await writeFile(join(cwd, ".gitignore"), ".cache/\n");
+    await git(cwd, "add", ".gitignore");
+    await git(cwd, "config", "user.email", "test@example.com");
+    await git(cwd, "config", "user.name", "Test");
+    await git(cwd, "commit", "-m", "initial");
+    await mkdir(join(cwd, ".cache", "nested"), { recursive: true });
+    await writeFile(join(cwd, ".cache", "nested", "artifact.txt"), "ignored\n");
+
+    assert.deepEqual(await getIgnoredPaths(fakePi(), cwd), [".cache"]);
   } finally {
     await rm(cwd, { recursive: true, force: true });
   }
