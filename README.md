@@ -111,7 +111,7 @@ The review window closes when pi shuts down, switches sessions, or reloads exten
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 22.19+
 - pi
 - A Git repository
 - macOS, Linux, or Windows supported by [Glimpse](https://github.com/hazat/glimpse)
